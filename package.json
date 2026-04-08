@@ -1,0 +1,22 @@
+{
+  "name": "@agiterra/knowledge-indexer-tools",
+  "version": "0.1.0",
+  "description": "Knowledge vault auto-indexing primitives — sidecar lifecycle, queue management, path matching. Runtime-agnostic.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/"
+  ],
+  "dependencies": {
+    "@agiterra/knowledge-tools": "agiterra/knowledge-tools#v0.2.1",
+    "@agiterra/crew-tools": "agiterra/crew-tools"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "license": "MIT",
+  "author": "Tim Garthwaite <https://github.com/mividtim>"
+}
