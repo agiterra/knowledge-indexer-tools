@@ -4,16 +4,32 @@
  * Manages a headless Haiku agent that handles all indexing work:
  * keyword generation, index-vault updates, and vectorize incremental.
  *
+ * Sidecar is keyed by project directory (cwd), not agent ID. One sidecar
+ * per repo, shared by all agents working in that directory. Exits after
+ * 1 hour of inactivity.
+ *
  * Uses crew-tools Orchestrator for agent lifecycle (screen sessions).
  * Communication via a file-based queue + screen sendKeys to poke.
  */
 
 import { join } from "path";
+import { createHash } from "crypto";
 import { Orchestrator, screen } from "@agiterra/crew-tools";
 import { queuePath } from "./queue.js";
 
-const SIDECAR_ID = "kx";
-const SIDECAR_DISPLAY = "KX (indexer)";
+const IDLE_TIMEOUT_MINUTES = 60;
+
+/** Generate a stable sidecar ID for a project directory. */
+function sidecarId(cwd: string): string {
+  const hash = createHash("sha256").update(cwd).digest("hex").slice(0, 8);
+  return `kx-${hash}`;
+}
+
+/** Generate a display name from the project directory. */
+function sidecarDisplay(cwd: string): string {
+  const dirName = cwd.split("/").pop() ?? "unknown";
+  return `KX (${dirName})`;
+}
 
 /**
  * Resolve knowledge-tools scripts path.
@@ -23,7 +39,6 @@ export function resolveScriptsPath(pluginRoot?: string): string {
   if (pluginRoot) {
     return join(pluginRoot, "node_modules", "@agiterra", "knowledge-tools", "scripts");
   }
-  // Fallback: search plugin cache
   const cacheBase = join(process.env.HOME ?? "/tmp", ".claude", "plugins", "cache");
   const { readdirSync, existsSync } = require("fs");
   try {
@@ -40,48 +55,51 @@ export function resolveScriptsPath(pluginRoot?: string): string {
   throw new Error("knowledge-tools scripts not found in plugin cache");
 }
 
-/** Check if the sidecar is alive. */
-export async function isAlive(): Promise<boolean> {
+/** Check if the sidecar for a project is alive. */
+export async function isAlive(cwd: string): Promise<boolean> {
   const orch = new Orchestrator();
-  const agent = orch.store.getAgent(SIDECAR_ID);
+  const id = sidecarId(cwd);
+  const agent = orch.store.getAgent(id);
   if (!agent) return false;
   return screen.isAlive(agent.screen_name);
 }
 
 /** Find and health-check an existing sidecar. Returns true if responsive. */
-export async function healthCheck(): Promise<boolean> {
-  if (!(await isAlive())) return false;
+export async function healthCheck(cwd: string): Promise<boolean> {
+  if (!(await isAlive(cwd))) return false;
 
   const orch = new Orchestrator();
+  const id = sidecarId(cwd);
   try {
-    await orch.sendToAgent(SIDECAR_ID, "ping\n");
+    await orch.sendToAgent(id, "ping\n");
     await new Promise((r) => setTimeout(r, 2000));
-    const output = await orch.readAgent(SIDECAR_ID);
+    const output = await orch.readAgent(id);
     return output.length > 0;
   } catch {
     return false;
   }
 }
 
-/** Launch a new sidecar. Kills any unresponsive existing one first. */
+/** Launch a new sidecar for a project. Kills any unresponsive existing one first. */
 export async function launch(cwd: string, opts?: { scriptsPath?: string }): Promise<void> {
   const orch = new Orchestrator();
+  const id = sidecarId(cwd);
   const scriptsPath = opts?.scriptsPath ?? resolveScriptsPath();
 
-  // Check for existing
-  const existing = orch.store.getAgent(SIDECAR_ID);
+  // Check for existing sidecar for this project
+  const existing = orch.store.getAgent(id);
   if (existing) {
     const alive = await screen.isAlive(existing.screen_name);
     if (alive) {
-      const healthy = await healthCheck();
+      const healthy = await healthCheck(cwd);
       if (healthy) return; // Already running and responsive
-      await orch.stopAgent(SIDECAR_ID);
+      await orch.stopAgent(id);
     } else {
-      orch.store.deleteAgent(SIDECAR_ID);
+      orch.store.deleteAgentByScreen(existing.screen_name);
     }
   }
 
-  const prompt = `You are KX, a knowledge vault indexer sidecar. You run as Haiku to save tokens.
+  const prompt = `You are KX, a knowledge vault indexer sidecar for ${cwd.split("/").pop()}. You run as Haiku to save tokens.
 
 Your job: when you receive a message, check the index queue at ${queuePath(cwd)} for file paths (one per line). For each file:
 
@@ -97,11 +115,13 @@ If the queue is empty when you check, just run vectorize incremental in case jou
 
 If you receive "ping", respond with "pong" and nothing else.
 
+IDLE TIMEOUT: If you receive no messages for ${IDLE_TIMEOUT_MINUTES} minutes, exit cleanly by typing /exit.
+
 Format your work concisely. No commentary — just do the indexing and report what you indexed.`;
 
   await orch.launchAgent({
-    id: SIDECAR_ID,
-    displayName: SIDECAR_DISPLAY,
+    id,
+    displayName: sidecarDisplay(cwd),
     runtime: "claude-code",
     projectDir: cwd,
     extraFlags: "--model haiku",
@@ -109,22 +129,23 @@ Format your work concisely. No commentary — just do the indexing and report wh
   });
 }
 
-/** Poke the sidecar to process the queue. */
-export async function poke(): Promise<void> {
+/** Poke the sidecar for a project to process the queue. */
+export async function poke(cwd: string): Promise<void> {
   const orch = new Orchestrator();
-  await orch.sendToAgent(SIDECAR_ID, "process queue\n");
+  await orch.sendToAgent(sidecarId(cwd), "process queue\n");
 }
 
-/** Stop the sidecar. */
-export async function stop(): Promise<void> {
+/** Stop the sidecar for a project. */
+export async function stop(cwd: string): Promise<void> {
   const orch = new Orchestrator();
-  const agent = orch.store.getAgent(SIDECAR_ID);
+  const id = sidecarId(cwd);
+  const agent = orch.store.getAgent(id);
   if (!agent) return;
 
   const alive = await screen.isAlive(agent.screen_name);
   if (alive) {
-    await orch.stopAgent(SIDECAR_ID);
+    await orch.stopAgent(id);
   } else {
-    orch.store.deleteAgent(SIDECAR_ID);
+    orch.store.deleteAgentByScreen(agent.screen_name);
   }
 }
