@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/knowledge-indexer-tools",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Knowledge vault auto-indexing primitives — sidecar lifecycle, queue management, path matching. Runtime-agnostic.",
   "type": "module",
   "main": "./src/index.ts",
@@ -11,8 +11,8 @@
     "src/"
   ],
   "dependencies": {
-    "@agiterra/knowledge-tools": "agiterra/knowledge-tools#v0.2.1",
-    "@agiterra/crew-tools": "agiterra/crew-tools#v0.7.0"
+    "@agiterra/knowledge-tools": "agiterra/knowledge-tools#v0.2.3",
+    "@agiterra/crew-tools": "agiterra/crew-tools#v2.0.0"
   },
   "devDependencies": {
     "bun-types": "latest"

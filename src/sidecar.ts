@@ -120,8 +120,10 @@ IDLE TIMEOUT: If you receive no messages for ${IDLE_TIMEOUT_MINUTES} minutes, ex
 Format your work concisely. No commentary — just do the indexing and report what you indexed.`;
 
   await orch.launchAgent({
-    id,
-    displayName: sidecarDisplay(cwd),
+    env: {
+      AGENT_ID: id,
+      AGENT_NAME: sidecarDisplay(cwd),
+    },
     runtime: "claude-code",
     projectDir: cwd,
     extraFlags: "--model haiku",
