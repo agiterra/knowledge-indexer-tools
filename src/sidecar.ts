@@ -14,10 +14,20 @@
 
 import { join } from "path";
 import { createHash } from "crypto";
-import { Orchestrator, screen } from "@agiterra/crew-tools";
+import { Orchestrator, screen, createBackend } from "@agiterra/crew-tools";
 import { queuePath } from "./queue.js";
 
 const IDLE_TIMEOUT_MINUTES = 60;
+
+/**
+ * Build an Orchestrator. The sidecar only calls methods that don't touch
+ * the terminal backend (launchAgent, sendToAgent, readAgent, stopAgent),
+ * but crew-tools v2.1.0 requires the backend in the constructor — the
+ * detected backend is fine; none of its methods will actually run.
+ */
+async function makeOrch(): Promise<Orchestrator> {
+  return new Orchestrator(await createBackend());
+}
 
 /** Generate a stable sidecar ID for a project directory. */
 function sidecarId(cwd: string): string {
@@ -57,7 +67,7 @@ export function resolveScriptsPath(pluginRoot?: string): string {
 
 /** Check if the sidecar for a project is alive. */
 export async function isAlive(cwd: string): Promise<boolean> {
-  const orch = new Orchestrator();
+  const orch = await makeOrch();
   const id = sidecarId(cwd);
   const agent = orch.store.getAgent(id);
   if (!agent) return false;
@@ -68,7 +78,7 @@ export async function isAlive(cwd: string): Promise<boolean> {
 export async function healthCheck(cwd: string): Promise<boolean> {
   if (!(await isAlive(cwd))) return false;
 
-  const orch = new Orchestrator();
+  const orch = await makeOrch();
   const id = sidecarId(cwd);
   try {
     await orch.sendToAgent(id, "ping\n");
@@ -82,7 +92,7 @@ export async function healthCheck(cwd: string): Promise<boolean> {
 
 /** Launch a new sidecar for a project. Kills any unresponsive existing one first. */
 export async function launch(cwd: string, opts?: { scriptsPath?: string }): Promise<void> {
-  const orch = new Orchestrator();
+  const orch = await makeOrch();
   const id = sidecarId(cwd);
   const scriptsPath = opts?.scriptsPath ?? resolveScriptsPath();
 
@@ -132,13 +142,13 @@ Format your work concisely. No commentary — just do the indexing and report wh
 
 /** Poke the sidecar for a project to process the queue. */
 export async function poke(cwd: string): Promise<void> {
-  const orch = new Orchestrator();
+  const orch = await makeOrch();
   await orch.sendToAgent(sidecarId(cwd), "process queue\n");
 }
 
 /** Stop the sidecar for a project. */
 export async function stop(cwd: string): Promise<void> {
-  const orch = new Orchestrator();
+  const orch = await makeOrch();
   const id = sidecarId(cwd);
   const agent = orch.store.getAgent(id);
   if (!agent) return;
