@@ -115,8 +115,6 @@ If the queue is empty when you check, just run vectorize incremental in case jou
 
 If you receive "ping", respond with "pong" and nothing else.
 
-IDLE TIMEOUT: If you receive no messages for ${IDLE_TIMEOUT_MINUTES} minutes, exit cleanly by typing /exit.
-
 Format your work concisely. No commentary — just do the indexing and report what you indexed.`;
 
   await orch.launchAgent({
@@ -128,6 +126,7 @@ Format your work concisely. No commentary — just do the indexing and report wh
     projectDir: cwd,
     extraFlags: "--model haiku",
     prompt,
+    ttlIdleMinutes: IDLE_TIMEOUT_MINUTES,
   });
 }
 
