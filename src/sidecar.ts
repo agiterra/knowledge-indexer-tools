@@ -15,7 +15,7 @@
 import { join } from "path";
 import { createHash } from "crypto";
 import { Orchestrator, screen, createBackend } from "@agiterra/crew-tools";
-import { queuePath } from "./queue.js";
+import { queuePath, enqueue, readQueueEntries } from "./queue.js";
 
 /** How long launch() waits for the registry row to show a live process. */
 const LAUNCH_VERIFY_TIMEOUT_MS = 20000;
@@ -195,6 +195,86 @@ Format your work concisely. No commentary — just do the indexing and report wh
     "sidecar launch did not produce a live process for " + id + " within " +
       LAUNCH_VERIFY_TIMEOUT_MS + "ms -- the registry row was never updated or the runtime exited immediately. NOT reporting this as launched.",
   );
+}
+
+/**
+ * Launch, then RECONCILE. A restarted sidecar with an empty queue is useless if
+ * the vault drifted while it was down, and that state looks perfectly healthy
+ * from every angle. Anything the scan says is unindexed gets enqueued and poked.
+ *
+ * Separate from launch() so the liveness guarantee and the reconcile are
+ * independently testable, and so a reconcile failure is never mistaken for a
+ * launch failure -- the message says which one broke.
+ */
+export async function launchAndReconcile(
+  cwd: string,
+  opts?: { scriptsPath?: string },
+): Promise<{ launched: boolean; enqueued: number }> {
+  await launch(cwd, opts);
+  let enqueued = 0;
+  try {
+    enqueued = await reconcile(cwd, opts);
+  } catch (e: any) {
+    throw new Error(
+      "sidecar IS running, but reconcile failed so the vault may have an invisible backlog: " +
+        String(e?.message ?? e),
+    );
+  }
+  if (enqueued > 0) await poke(cwd);
+  return { launched: true, enqueued };
+}
+
+/**
+ * Reconcile the QUEUE against the vault's actual index state.
+ *
+ * ★ THE QUEUE CANNOT SEE ITS OWN BACKLOG. The sidecar only ever processes the
+ * queue, and the queue is written by a hook at vault-write time. So anything
+ * written while the sidecar was DEAD was never enqueued and is invisible to it
+ * forever: after a successful restart you get an EMPTY queue sitting beside
+ * unindexed files, with the sidecar, the queue and the status command all
+ * reporting fine (2026-07-31 -- 6 files on one vault, 10 on another, 4 of which
+ * survived a restart).
+ *
+ * index-vault.py scan already knows the truth. It was A MEASUREMENT WITH NO
+ * CONSUMER, which is its own failure class: nobody is wrong, and nothing acts.
+ *
+ * So: ask the scan what is unindexed, enqueue whatever the queue is missing, and
+ * return the count so the caller can SAY so. Reconciling from the authoritative
+ * state rather than trusting an incremental log is the same move as reading a
+ * lane's position from an append-only log rather than a terminal buffer.
+ */
+export async function reconcile(
+  cwd: string,
+  opts?: { scriptsPath?: string },
+): Promise<number> {
+  const scriptsPath = opts?.scriptsPath ?? resolveScriptsPath();
+  const proc = Bun.spawn(["python3", join(scriptsPath, "index-vault.py"), "scan"], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = await new Response(proc.stderr).text();
+    // FAIL LOUD. A reconcile that silently returns 0 is indistinguishable from
+    // a vault with nothing outstanding -- the calm-looking failure again.
+    throw new Error(
+      "index-vault.py scan failed (exit " + code + "); cannot reconcile the queue: " + err.slice(0, 200),
+    );
+  }
+
+  const needed = out
+    .split("\n")
+    .filter((l) => l.includes("NEEDS_INDEX:"))
+    .map((l) => l.slice(l.indexOf("NEEDS_INDEX:") + "NEEDS_INDEX:".length).trim())
+    .filter(Boolean);
+  if (needed.length === 0) return 0;
+
+  const already = new Set(await readQueueEntries(cwd));
+  const missing = needed.filter((f) => !already.has(f));
+  for (const f of missing) await enqueue(cwd, f);
+  return missing.length;
 }
 
 /** Poke the sidecar for a project to process the queue. */

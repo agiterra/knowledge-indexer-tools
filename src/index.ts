@@ -7,4 +7,6 @@ export {
   poke,
   stop,
   resolveScriptsPath,
+  reconcile,
+  launchAndReconcile,
 } from "./sidecar.js";
