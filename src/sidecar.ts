@@ -81,11 +81,50 @@ export function resolveScriptsPath(pluginRoot?: string): string {
  * be a live process. Checked with signal 0, which tests existence without
  * touching the process.
  */
+/**
+ * Is a sidecar for `id` running even though the registry has NO ROW for it?
+ *
+ * WHY (2026-09-18). `isAlive` answered `if (!agent) return false`, which resolves "I have no
+ * record of it" and "it is not running" to the same answer -- and the CALLER LAUNCHES on false.
+ * A sidecar with no row therefore produced ONE NEW `claude` PROCESS PER VAULT WRITE, unbounded
+ * and not self-healing: three live sidecars for one vault inside twenty-four minutes on the
+ * Manager's host, reproduced cleanly afterwards (Write -> one sidecar, no row; Write again ->
+ * two sidecars, still no row).
+ *
+ * A ROWLESS-BUT-LIVE SIDECAR IS THE NORMAL CASE HERE, NOT AN EDGE CASE. `launchAgent` does not
+ * register what it starts, and registration is SELF-registration -- crew-tools reads the CALLER's
+ * screen context and refuses an id that does not own that screen -- so nothing can write the row
+ * on the sidecar's behalf, and the KX prompt has no register step. Measured the same day on this
+ * host: 13 live `wire-` screens, 7 agent rows, 6 live screens with no row.
+ * => The registry is a cache of convenience; liveness must not be gated on it.
+ *
+ * The function below already got this exact distinction right for SIGNALS (ESRCH vs EPERM) and
+ * its comment warns that collapsing them "relaunches a HEALTHY sidecar on every hook fire". The
+ * defect was on the uncommented line above that careful branch. Same discipline applied here:
+ * the screen's own `state` is checked, because a "Remote or dead" socket is presence, not life.
+ */
+async function aliveWithoutRow(id: string): Promise<boolean> {
+  const name = `wire-${id}`;
+  const session = (await screen.listSessions()).find((s) => s.name === name);
+  if (!session) return false;
+  if (session.state && /dead/i.test(session.state)) return false;
+  if (!Number.isFinite(session.pid) || session.pid <= 0) return false;
+  try {
+    process.kill(session.pid, 0);
+    return true;
+  } catch (e: any) {
+    if (e?.code === "EPERM") return true; // exists, other uid
+    return false; // ESRCH
+  }
+}
+
 export async function isAlive(cwd: string): Promise<boolean> {
   const orch = await makeOrch();
   const id = sidecarId(cwd);
   const agent = orch.store.getAgent(id);
-  if (!agent) return false;
+  // NOT `return false`. An absent row is "unknown", not "dead" -- and the caller LAUNCHES on
+  // false. Ask the screen directly before concluding anything.
+  if (!agent) return aliveWithoutRow(id);
   if (!(await screen.isAlive(agent.screen_name))) return false;
 
   const pid = Number(agent.screen_pid);
@@ -134,6 +173,9 @@ export async function launch(cwd: string, opts?: { scriptsPath?: string }): Prom
 
   // Check for existing sidecar for this project
   const existing = orch.store.getAgent(id);
+  // THE SAME FAIL-OPEN, ONE LAYER UP. Without this a rowless-but-live sidecar falls past the
+  // dedup check and we spawn a duplicate -- which is how the loop survived repairing the registry.
+  if (!existing && (await aliveWithoutRow(id))) return; // already running, merely unregistered
   if (existing) {
     const alive = await screen.isAlive(existing.screen_name);
     if (alive) {
