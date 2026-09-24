@@ -81,29 +81,47 @@ export function resolveScriptsPath(pluginRoot?: string): string {
  * be a live process. Checked with signal 0, which tests existence without
  * touching the process.
  */
+/**
+ * Every pid of a LIVE screen session named EXACTLY `name` -- all of them, not the first.
+ *
+ * ⛔ 2026-09-24 (Brioche's vault, wire-kx-38732d94): screen keeps "(Remote or dead)" sockets for
+ * sessions that died uncleanly, under the SAME name as the live one. crew-tools' listSessions drops
+ * the state column and getSessionPid returns the FIRST name match, so with three dead sockets beside
+ * the live sidecar the answer depended on listing order: a dead one sorted first -> ESRCH -> "not
+ * running" -> the hook launched a SECOND full sidecar (both ~150 MB, both on the queue, for days).
+ * A liveness question about a NAME has to look at every session carrying that name.
+ * EPERM counts as alive: the process exists under another uid (see isAlive below).
+ */
+async function liveSessionPids(name: string): Promise<number[]> {
+  const pids: number[] = [];
+  for (const s of await screen.listSessions()) {
+    if (s.name !== name) continue;
+    const st = (s as { state?: string }).state;
+    if (st && /dead/i.test(st)) continue;
+    if (!Number.isFinite(s.pid) || s.pid <= 0) continue;
+    try {
+      process.kill(s.pid, 0);
+      pids.push(s.pid);
+    } catch (e: any) {
+      if (e?.code === "EPERM") pids.push(s.pid); // exists, other uid
+    }
+  }
+  return pids;
+}
+
 export async function isAlive(cwd: string): Promise<boolean> {
   const orch = await makeOrch();
   const id = sidecarId(cwd);
   const agent = orch.store.getAgent(id);
-  if (!agent) return false;
-  if (!(await screen.isAlive(agent.screen_name))) return false;
-
-  const pid = Number(agent.screen_pid);
-  if (!Number.isFinite(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e: any) {
-    // DISTINGUISH THE TWO FAILURES. ESRCH is "no such process" -- the corpse we
-    // are hunting. EPERM is "the process EXISTS, you may not signal it", which
-    // happens the moment a sidecar runs under another uid (crew-tools grew
-    // run_as_uid agents in v2.19.0). Collapsing both into `return false` swaps
-    // the false positive for a false negative and relaunches a HEALTHY sidecar
-    // on every hook fire -- duplicate indexers racing on one queue. A liveness
-    // probe has to be wrong in neither direction to be worth gating on.
-    if (e?.code === "EPERM") return true;
-    return false; // ESRCH: stale registry row sitting over a dead socket
-  }
+  // NOT `return false` on a missing row. An absent row is "unknown", not "dead" -- and the caller
+  // LAUNCHES on false. crew-tools' reality layer deletes rows it cannot see (and a hook whose
+  // CREW_DB is the shared registry never had one), so ask the screens directly.
+  // ⛔ AND NOT the recorded screen_pid either: a row outlives its process (AGI-75 found the
+  // reverse -- a live socket over a dead pid). The question is "is ANY session with this exact
+  // name alive", which answers both the corpse case (all dead -> false) and the stale-row case
+  // (row pid dead, sidecar alive under a newer pid -> true).
+  const name = agent?.screen_name ?? `wire-${id}`;
+  return (await liveSessionPids(name)).length > 0;
 }
 
 /** Find and health-check an existing sidecar. Returns true if responsive. */
@@ -142,15 +160,28 @@ export async function launch(cwd: string, opts?: { scriptsPath?: string }): Prom
 
   // Check for existing sidecar for this project
   const existing = orch.store.getAgent(id);
-  if (existing) {
-    const alive = await screen.isAlive(existing.screen_name);
-    if (alive) {
-      const healthy = await healthCheck(cwd);
-      if (healthy) return; // Already running and responsive
-      await orch.stopAgent(id);
-    } else {
-      orch.store.deleteAgentByScreen(existing.screen_name);
-    }
+  const name = existing?.screen_name ?? `wire-${id}`;
+  if ((await liveSessionPids(name)).length > 0) {
+    // Rowless but live: running, merely unregistered (a shared-registry CREW_DB never had a kx row).
+    // healthCheck cannot ping without a row, so do not mistake "unaddressable" for "unhealthy".
+    if (!existing) return;
+    const healthy = await healthCheck(cwd);
+    if (healthy) return; // Already running and responsive
+    await orch.stopAgent(id);
+  } else if (existing) {
+    orch.store.deleteAgentByScreen(existing.screen_name);
+  }
+  // ⛔ FINAL GATE: never spawn beside a live session of the same name. stopAgent kills through
+  // crew-tools' first-match getSessionPid and a bare `screen -S <name> -X quit`, either of which can
+  // miss the live session when dead same-named sockets exist; a rowless live sidecar has no row to
+  // stop at all. Launching anyway is exactly how the duplicate was made. Say so, and stay out.
+  const survivors = await liveSessionPids(name);
+  if (survivors.length > 0) {
+    console.error(
+      `[kx] NOT launching ${id}: live screen session(s) ${survivors.join(",")} still named ${name} ` +
+        `(unhealthy or unstoppable). Refusing to start a duplicate; inspect with screen -ls.`,
+    );
+    return;
   }
 
   const prompt = `You are KX, a knowledge vault indexer sidecar for ${cwd.split("/").pop()}. You run as Haiku to save tokens.
@@ -298,7 +329,7 @@ export async function stop(cwd: string): Promise<void> {
   const agent = orch.store.getAgent(id);
   if (!agent) return;
 
-  const alive = await screen.isAlive(agent.screen_name);
+  const alive = (await liveSessionPids(agent.screen_name)).length > 0;
   if (alive) {
     await orch.stopAgent(id);
   } else {
