@@ -316,10 +316,41 @@ export async function reconcile(
   return missing.length;
 }
 
-/** Poke the sidecar for a project to process the queue. */
+/**
+ * Poke the sidecar for a project to process the queue.
+ *
+ * ⛔ 2026-10-07 (Brioche, j:2036): isAlive() stopped requiring a registry row in v1.4.1, but poke
+ * still went through sendToAgent, which RESOLVES THE ROW and throws "agent 'kx-…' not found".
+ * Sidecars never self-register and the crew reaper drops rows, so on a live rowless sidecar the
+ * PostToolUse hook queued the file, called this, and died -- every vault write, every persona.
+ * The queue was then drained only by the hourly host sweep. Two callers of one fact ("is there a
+ * sidecar") must agree on what identifies it: here, as in isAlive, the live SCREEN is the source.
+ * Address it by `<pid>.<name>`: a bare name is ambiguous when dead same-named sockets sit beside it.
+ */
 export async function poke(cwd: string): Promise<void> {
   const orch = await makeOrch();
-  await orch.sendToAgent(sidecarId(cwd), "process queue\n");
+  const id = sidecarId(cwd);
+  if (orch.store.getAgent(id)) {
+    await orch.sendToAgent(id, "process queue\n");
+    return;
+  }
+  const name = `wire-${id}`;
+  const pids = await liveSessionPids(name);
+  if (pids.length === 0) {
+    throw new Error(`[kx] cannot poke ${id}: no registry row and no live screen session named ${name}`);
+  }
+  if (pids.length > 1) {
+    throw new Error(
+      `[kx] cannot poke ${id}: ${pids.length} live sessions named ${name} (${pids.join(",")}) -- ` +
+        `a duplicate sidecar; inspect with screen -ls, poking one would hide the other`,
+    );
+  }
+  const target = `${pids[0]}.${name}`;
+  // Body, settle, then a lone submit: a terminator inside the paste-coalescing window is inserted
+  // as a newline instead of submitting (same recipe as crew-tools sendToAgent).
+  await screen.sendKeys(target, "process queue");
+  await new Promise((r) => setTimeout(r, 700));
+  await screen.sendKeys(target, "\r");
 }
 
 /** Stop the sidecar for a project. */
