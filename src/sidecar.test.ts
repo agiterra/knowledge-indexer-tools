@@ -31,6 +31,8 @@ const state = {
   deleted: 0,
   pong: false,
   pongs: 0,
+  rowSends: 0,
+  keys: [] as { name: string; text: string }[],
 };
 
 // Installed BEFORE sidecar is imported -- sidecar builds its Orchestrator at
@@ -40,6 +42,7 @@ mock.module("@agiterra/crew-tools", () => ({
     listSessions: async () => state.sessions,
     // Deliberately the OLD first-match semantics, so a regression back to it is caught.
     isAlive: async (name: string) => state.sessions.some((s) => s.name === name),
+    sendKeys: async (name: string, text: string) => { state.keys.push({ name, text }); },
   },
   createBackend: async () => ({}),
   Orchestrator: class {
@@ -53,6 +56,7 @@ mock.module("@agiterra/crew-tools", () => ({
     }
     async sendToAgent(_id: string, _t: string) {
       if (!state.agent) throw new Error("agent not found");
+      state.rowSends++;
       if (state.pong) state.pongs++;
     }
     // A stop that does NOT kill the live session: what crew-tools' first-match
@@ -65,7 +69,7 @@ mock.module("@agiterra/crew-tools", () => ({
   },
 }));
 
-const { isAlive, launch } = await import("./sidecar.js");
+const { isAlive, launch, poke } = await import("./sidecar.js");
 
 const CWD = "/tmp/kx-test-project";
 const ID = "kx-" + createHash("sha256").update(CWD).digest("hex").slice(0, 8);
@@ -91,6 +95,8 @@ beforeEach(() => {
   state.deleted = 0;
   state.pong = false;
   state.pongs = 0;
+  state.rowSends = 0;
+  state.keys = [];
 });
 
 describe("isAlive", () => {
@@ -193,5 +199,39 @@ describe("launch never spawns beside a live same-named session", () => {
   test("no row + no session -> launched", async () => {
     await launch(CWD, opts);
     expect(state.launched).toBe(1);
+  });
+});
+
+describe("poke reaches a live sidecar with or without a registry row", () => {
+  // ★ THE j:2036 CASE: isAlive said yes (rowless + live), poke threw "agent not found".
+  test("rowless + live -> typed into THAT session by pid.name, then a lone submit", async () => {
+    state.sessions = [{ name: NAME, pid: await deadPid(), state: "Remote or dead" }, { name: NAME, pid: process.pid }];
+    await poke(CWD);
+    expect(state.keys).toEqual([
+      { name: `${process.pid}.${NAME}`, text: "process queue" },
+      { name: `${process.pid}.${NAME}`, text: "\r" },
+    ]);
+  });
+
+  test("row present -> the crew path, no raw keys", async () => {
+    state.sessions = [{ name: NAME, pid: process.pid }];
+    registerAgent(process.pid);
+    await poke(CWD);
+    expect(state.rowSends).toBe(1);
+    expect(state.keys.length).toBe(0);
+  });
+
+  test("rowless + no live session -> throws, names the id", async () => {
+    state.sessions = [{ name: NAME, pid: await deadPid() }];
+    await expect(poke(CWD)).rejects.toThrow(ID);
+    expect(state.keys.length).toBe(0);
+  });
+
+  test("rowless + TWO live sessions -> throws duplicate, types nothing", async () => {
+    const kid = Bun.spawn(["sleep", "5"]);
+    state.sessions = [{ name: NAME, pid: process.pid }, { name: NAME, pid: kid.pid }];
+    await expect(poke(CWD)).rejects.toThrow(/duplicate/);
+    expect(state.keys.length).toBe(0);
+    kid.kill();
   });
 });
