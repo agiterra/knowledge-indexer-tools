@@ -33,6 +33,7 @@ const state = {
   pongs: 0,
   rowSends: 0,
   keys: [] as { name: string; text: string }[],
+  launchOpts: [] as { env?: Record<string, string>; extraFlags?: string }[],
 };
 
 // Installed BEFORE sidecar is imported -- sidecar builds its Orchestrator at
@@ -62,8 +63,9 @@ mock.module("@agiterra/crew-tools", () => ({
     // A stop that does NOT kill the live session: what crew-tools' first-match
     // getSessionPid + bare `screen -S <name> -X quit` does when dead same-named sockets exist.
     async stopAgent(_id: string) { state.stopped++; }
-    async launchAgent(_o: unknown) {
+    async launchAgent(o: { env?: Record<string, string>; extraFlags?: string }) {
       state.launched++;
+      state.launchOpts.push(o);
       state.sessions.push({ name: `wire-${ID}`, pid: process.pid });
     }
   },
@@ -97,6 +99,7 @@ beforeEach(() => {
   state.pongs = 0;
   state.rowSends = 0;
   state.keys = [];
+  state.launchOpts = [];
 });
 
 describe("isAlive", () => {
@@ -199,6 +202,16 @@ describe("launch never spawns beside a live same-named session", () => {
   test("no row + no session -> launched", async () => {
     await launch(CWD, opts);
     expect(state.launched).toBe(1);
+  });
+  // Tim 2026-10-15: a sidecar runs Haiku and nothing else. The env pin keeps a
+  // ${CLAUDE_MODEL:-...} template from expanding to the parent's model; the
+  // trailing flag beats a template that hardcodes --model.
+  test("launch pins Haiku in env AND as the last --model flag", async () => {
+    await launch(CWD, opts);
+    const o = state.launchOpts[0]!;
+    expect(o.env?.CLAUDE_MODEL).toBe("haiku");
+    const models = [...(o.extraFlags ?? "").matchAll(/--model[= ](\S+)/g)].map((m) => m[1]);
+    expect(models.at(-1)).toBe("haiku");
   });
 });
 
