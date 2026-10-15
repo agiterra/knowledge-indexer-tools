@@ -20,6 +20,9 @@ import { queuePath, enqueue, readQueueEntries } from "./queue.js";
 /** How long launch() waits for the registry row to show a live process. */
 const LAUNCH_VERIFY_TIMEOUT_MS = 20000;
 
+/** The only model a KX sidecar may run (Tim 2026-10-15). */
+export const SIDECAR_MODEL = "haiku";
+
 const IDLE_TIMEOUT_MINUTES = 60;
 
 /**
@@ -203,13 +206,21 @@ If you receive "ping", respond with "pong" and nothing else.
 Format your work concisely. No commentary — just do the indexing and report what you indexed.`;
 
   await orch.launchAgent({
+    // The model is pinned TWICE, on purpose. Tim 2026-10-15: no sidecar ever
+    // runs anything but Haiku. CLAUDE_MODEL feeds every runtime template that
+    // reads ${CLAUDE_MODEL:-...}; without it the sidecar inherited the parent
+    // persona's pin or the template default, and its argv carried
+    // claude-fable-5 / claude-opus-4-8 ahead of the trailing flag. The trailing
+    // --model haiku still wins (last flag wins) for a template that hardcodes
+    // its own --model, e.g. a per-uid ~/.wire/runtimes.json.
     env: {
       AGENT_ID: id,
       AGENT_NAME: sidecarDisplay(cwd),
+      CLAUDE_MODEL: SIDECAR_MODEL,
     },
     runtime: "claude-code",
     projectDir: cwd,
-    extraFlags: "--model haiku",
+    extraFlags: `--model ${SIDECAR_MODEL}`,
     prompt,
     ttlIdleMinutes: IDLE_TIMEOUT_MINUTES,
   });
