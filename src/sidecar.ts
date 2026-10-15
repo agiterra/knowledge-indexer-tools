@@ -20,6 +20,40 @@ import { queuePath, enqueue, readQueueEntries } from "./queue.js";
 /** How long launch() waits for the registry row to show a live process. */
 const LAUNCH_VERIFY_TIMEOUT_MS = 20000;
 
+const BOOT_CONFIRM_TIMEOUT_MS = 45000;
+
+function isReadonlyRowWrite(e: unknown): boolean {
+  return /attempt to write a readonly database/i.test(String((e as { message?: string })?.message ?? e));
+}
+
+/**
+ * Press Enter through Claude Code's boot dialogs (folder trust, dev-channel
+ * consent; all share "Enter to confirm") until the input footer renders.
+ * Targets the exact pid.name of the ONE live session, never a bare name.
+ * Throws on timeout: a sidecar parked at a dialog looks alive and indexes
+ * nothing.
+ */
+async function confirmBootDialogs(name: string): Promise<void> {
+  const timeoutMs = Number(process.env.KX_BOOT_CONFIRM_MS) || BOOT_CONFIRM_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pids = await liveSessionPids(name);
+    if (pids.length > 1) throw new Error(`[kx] ${pids.length} live sessions named ${name} (${pids.join(",")}) -- a duplicate sidecar`);
+    if (pids.length === 1) {
+      const target = `${pids[0]}.${name}`;
+      const buf = await screen.readOutput(target);
+      if (buf.includes("Enter to confirm")) {
+        await screen.sendKeys(target, "\r");
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      if (buf.includes("⏵⏵") || buf.includes("? for shortcuts")) return;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`[kx] ${name}: boot dialogs did not clear within ${timeoutMs}ms -- the sidecar is parked, NOT launched`);
+}
+
 /** The only model a KX sidecar may run (Tim 2026-10-15). */
 export const SIDECAR_MODEL = "haiku";
 
@@ -205,7 +239,7 @@ If you receive "ping", respond with "pong" and nothing else.
 
 Format your work concisely. No commentary — just do the indexing and report what you indexed.`;
 
-  await orch.launchAgent({
+  const launchOpts = {
     // The model is pinned TWICE, on purpose. Tim 2026-10-15: no sidecar ever
     // runs anything but Haiku. CLAUDE_MODEL feeds every runtime template that
     // reads ${CLAUDE_MODEL:-...}; without it the sidecar inherited the parent
@@ -217,13 +251,30 @@ Format your work concisely. No commentary — just do the indexing and report wh
       AGENT_ID: id,
       AGENT_NAME: sidecarDisplay(cwd),
       CLAUDE_MODEL: SIDECAR_MODEL,
+      // A hook or a CLI run from inside Claude Code inherits this marker, and
+      // the sidecar then saves NO transcript ("Transcript saving is off"), so
+      // nothing can show which model answered. Blank it for the sidecar.
+      CLAUDE_CODE_CHILD_SESSION: "",
     },
     runtime: "claude-code",
     projectDir: cwd,
     extraFlags: `--model ${SIDECAR_MODEL}`,
     prompt,
     ttlIdleMinutes: IDLE_TIMEOUT_MINUTES,
-  });
+  };
+  try {
+    await orch.launchAgent(launchOpts);
+  } catch (e) {
+    // crews.db is writable only by crew-service (AGI-27). crew-tools >= 2.27
+    // creates the screen, fires its dialog auto-confirm without awaiting it,
+    // and THEN throws on the row write. The sidecar is running, rowless by
+    // design (isAlive, poke and stop all handle that), but this process exits
+    // before the auto-confirm lands and the sidecar sits at its dev-channel
+    // dialog forever. Any OTHER error is a real launch failure.
+    if (!isReadonlyRowWrite(e)) throw e;
+    console.warn(`[kx] ${id}: crews.db refused the row write (readonly outside crew-service). The sidecar runs rowless. Confirming its boot dialogs here.`);
+    await confirmBootDialogs(`wire-${id}`);
+  }
 
   // VERIFY THE EFFECT, NOT THE CALL. launch used to return as soon as
   // launchAgent resolved, and the CLI printed "kx sidecar: launched" even when

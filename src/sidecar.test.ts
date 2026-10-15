@@ -36,6 +36,8 @@ const state = {
   launchOpts: [] as { env?: Record<string, string>; extraFlags?: string }[],
   killWorks: true,
   killed: [] as string[],
+  launchError: null as Error | null,
+  screenText: [] as string[],
 };
 
 // Installed BEFORE sidecar is imported -- sidecar builds its Orchestrator at
@@ -46,6 +48,7 @@ mock.module("@agiterra/crew-tools", () => ({
     // Deliberately the OLD first-match semantics, so a regression back to it is caught.
     isAlive: async (name: string) => state.sessions.some((s) => s.name === name),
     sendKeys: async (name: string, text: string) => { state.keys.push({ name, text }); },
+    readOutput: async (_name: string) => state.screenText.length > 1 ? state.screenText.shift()! : (state.screenText[0] ?? ""),
     killSession: async (name: string) => {
       state.killed.push(name);
       if (state.killWorks) state.sessions = state.sessions.filter((s) => s.name !== name);
@@ -74,6 +77,7 @@ mock.module("@agiterra/crew-tools", () => ({
       state.launched++;
       state.launchOpts.push(o);
       state.sessions.push({ name: `wire-${ID}`, pid: process.pid });
+      if (state.launchError) throw state.launchError;
     }
   },
 }));
@@ -109,6 +113,8 @@ beforeEach(() => {
   state.launchOpts = [];
   state.killWorks = true;
   state.killed = [];
+  state.launchError = null;
+  state.screenText = [];
 });
 
 describe("isAlive", () => {
@@ -285,5 +291,38 @@ describe("stop stops a live sidecar with or without a registry row", () => {
     state.killWorks = false;
     state.sessions = [{ name: NAME, pid: process.pid }];
     await expect(stop(CWD)).rejects.toThrow(/did not stop/);
+  });
+});
+
+describe("launch survives the crews.db row refusal (crew-service owns writes)", () => {
+  const opts = { scriptsPath: "/nonexistent" };
+
+  test("readonly row write -> dialog confirmed on pid.name, launch resolves", async () => {
+    state.launchError = new Error("SQLiteError: attempt to write a readonly database");
+    state.screenText = ["Channels: plugin:wire@agiterra  Enter to confirm", "\u23f5\u23f5 bypass permissions on"];
+    await launch(CWD, opts);
+    expect(state.keys).toEqual([{ name: `${process.pid}.${NAME}`, text: "\r" }]);
+  });
+
+  test("any other launch error -> rethrown, nothing typed", async () => {
+    state.launchError = new Error("unknown runtime 'claude-code'");
+    await expect(launch(CWD, opts)).rejects.toThrow(/unknown runtime/);
+    expect(state.keys.length).toBe(0);
+  });
+
+  test("dialog that never clears -> throws, never reports launched", async () => {
+    process.env.KX_BOOT_CONFIRM_MS = "2500";
+    try {
+      state.launchError = new Error("attempt to write a readonly database");
+      state.screenText = ["Enter to confirm"];
+      await expect(launch(CWD, opts)).rejects.toThrow(/did not clear/);
+    } finally {
+      delete process.env.KX_BOOT_CONFIRM_MS;
+    }
+  });
+
+  test("launch env blanks CLAUDE_CODE_CHILD_SESSION so the sidecar keeps a transcript", async () => {
+    await launch(CWD, opts);
+    expect(state.launchOpts[0]!.env?.CLAUDE_CODE_CHILD_SESSION).toBe("");
   });
 });
