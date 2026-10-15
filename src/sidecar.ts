@@ -364,17 +364,33 @@ export async function poke(cwd: string): Promise<void> {
   await screen.sendKeys(target, "\r");
 }
 
-/** Stop the sidecar for a project. */
+/**
+ * Stop the sidecar for a project, and PROVE it stopped.
+ *
+ * It used to return at once when there was no registry row. Sidecars never
+ * self-register and the crew reaper drops unregistered rows, so the usual live
+ * sidecar HAS no row: stop printed "stopped", the screen kept running, and the
+ * next start saw it alive and launched nothing (2026-10-15, the Haiku restart).
+ * Same row-dependence v1.4.2 removed from poke. Now: the crew path when a row
+ * exists, then an exact pid.name kill of every live session that survives
+ * (rowless, or a stop that missed), then a re-check that throws on a survivor.
+ */
 export async function stop(cwd: string): Promise<void> {
   const orch = await makeOrch();
   const id = sidecarId(cwd);
   const agent = orch.store.getAgent(id);
-  if (!agent) return;
+  const names = [...new Set([agent?.screen_name, `wire-${id}`].filter((n): n is string => !!n))];
+  const live = async () => (await Promise.all(names.map(liveSessionPids))).flat();
 
-  const alive = (await liveSessionPids(agent.screen_name)).length > 0;
-  if (alive) {
-    await orch.stopAgent(id);
-  } else {
-    orch.store.deleteAgentByScreen(agent.screen_name);
+  if (agent && (await live()).length > 0) await orch.stopAgent(id);
+  for (const n of names) {
+    if ((await liveSessionPids(n)).length > 0) await screen.killSession(n);
   }
+  const left = await live();
+  if (left.length > 0) {
+    throw new Error(
+      `[kx] stop ${id} did not stop it: live session pid(s) ${left.join(",")} remain under ${names.join(" / ")}. NOT reporting this as stopped.`,
+    );
+  }
+  if (orch.store.getAgent(id)) orch.store.deleteAgentByScreen(agent?.screen_name ?? `wire-${id}`);
 }
