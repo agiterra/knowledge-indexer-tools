@@ -34,6 +34,8 @@ const state = {
   rowSends: 0,
   keys: [] as { name: string; text: string }[],
   launchOpts: [] as { env?: Record<string, string>; extraFlags?: string }[],
+  killWorks: true,
+  killed: [] as string[],
 };
 
 // Installed BEFORE sidecar is imported -- sidecar builds its Orchestrator at
@@ -44,6 +46,11 @@ mock.module("@agiterra/crew-tools", () => ({
     // Deliberately the OLD first-match semantics, so a regression back to it is caught.
     isAlive: async (name: string) => state.sessions.some((s) => s.name === name),
     sendKeys: async (name: string, text: string) => { state.keys.push({ name, text }); },
+    killSession: async (name: string) => {
+      state.killed.push(name);
+      if (state.killWorks) state.sessions = state.sessions.filter((s) => s.name !== name);
+      return 0;
+    },
   },
   createBackend: async () => ({}),
   Orchestrator: class {
@@ -71,7 +78,7 @@ mock.module("@agiterra/crew-tools", () => ({
   },
 }));
 
-const { isAlive, launch, poke } = await import("./sidecar.js");
+const { isAlive, launch, poke, stop } = await import("./sidecar.js");
 
 const CWD = "/tmp/kx-test-project";
 const ID = "kx-" + createHash("sha256").update(CWD).digest("hex").slice(0, 8);
@@ -100,6 +107,8 @@ beforeEach(() => {
   state.rowSends = 0;
   state.keys = [];
   state.launchOpts = [];
+  state.killWorks = true;
+  state.killed = [];
 });
 
 describe("isAlive", () => {
@@ -246,5 +255,35 @@ describe("poke reaches a live sidecar with or without a registry row", () => {
     await expect(poke(CWD)).rejects.toThrow(/duplicate/);
     expect(state.keys.length).toBe(0);
     kid.kill();
+  });
+});
+
+describe("stop stops a live sidecar with or without a registry row", () => {
+  test("rowless + live -> killed by exact name, nothing left, no throw", async () => {
+    state.sessions = [{ name: NAME, pid: process.pid }];
+    await stop(CWD);
+    expect(state.killed).toEqual([NAME]);
+    expect(state.sessions.length).toBe(0);
+  });
+
+  test("rowless + no session -> no-op, no throw", async () => {
+    await stop(CWD);
+    expect(state.killed.length).toBe(0);
+  });
+
+  test("row + live + stopAgent that MISSES -> kill fallback, row deleted", async () => {
+    registerAgent(process.pid);
+    state.sessions = [{ name: NAME, pid: process.pid }];
+    await stop(CWD);
+    expect(state.stopped).toBe(1);
+    expect(state.killed).toEqual([NAME]);
+    expect(state.sessions.length).toBe(0);
+    expect(state.agent).toBeNull();
+  });
+
+  test("a kill that misses -> throws, never reports stopped", async () => {
+    state.killWorks = false;
+    state.sessions = [{ name: NAME, pid: process.pid }];
+    await expect(stop(CWD)).rejects.toThrow(/did not stop/);
   });
 });
