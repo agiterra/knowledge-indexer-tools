@@ -255,6 +255,16 @@ Format your work concisely. No commentary — just do the indexing and report wh
       // the sidecar then saves NO transcript ("Transcript saving is off"), so
       // nothing can show which model answered. Blank it for the sidecar.
       CLAUDE_CODE_CHILD_SESSION: "",
+      // No Wire identity for a sidecar (Brioche 726977, 2026-10-16). Without this
+      // the sidecar inherited the PERSONA's key from the launching shell, so a
+      // helper process held the persona's signing key, and its wire MCP retried
+      // registering kx-<hash> with it every 60 s forever (403 unknown sender /
+      // 409 different key). Blank, not absent: crew-tools exports env AFTER the
+      // login shell, so "" overrides the inherited value, the wire server exits at
+      // startup (no key), and crew-tools >= 2.27.30 skips its inbound read-back for
+      // an explicit blank instead of alarming WIRE INBOUND BLIND. Poke stays on the
+      // screen path; nothing here ever needed Wire.
+      AGENT_PRIVATE_KEY: "",
     },
     runtime: "claude-code",
     projectDir: cwd,
