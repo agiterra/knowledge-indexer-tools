@@ -82,7 +82,7 @@ mock.module("@agiterra/crew-tools", () => ({
   },
 }));
 
-const { isAlive, launch, poke, stop } = await import("./sidecar.js");
+const { isAlive, launch, poke, stop, healthCheck } = await import("./sidecar.js");
 
 const CWD = "/tmp/kx-test-project";
 const ID = "kx-" + createHash("sha256").update(CWD).digest("hex").slice(0, 8);
@@ -262,6 +262,24 @@ describe("poke reaches a live sidecar with or without a registry row", () => {
     expect(state.keys.length).toBe(0);
     kid.kill();
   });
+});
+
+describe("healthCheck pings a rowless sidecar through its screen", () => {
+  test("rowless + live + a NEW pong after the ping -> healthy, typed by pid.name", async () => {
+    state.sessions = [{ name: NAME, pid: process.pid }];
+    state.screenText = ["", "pong"];
+    expect(await healthCheck(CWD)).toBe(true);
+    expect(state.keys).toEqual([
+      { name: `${process.pid}.${NAME}`, text: "ping" },
+      { name: `${process.pid}.${NAME}`, text: "\r" },
+    ]);
+  }, 10_000);
+
+  test("rowless + live + no new pong -> unhealthy", async () => {
+    state.sessions = [{ name: NAME, pid: process.pid }];
+    state.screenText = ["pong"];
+    expect(await healthCheck(CWD)).toBe(false);
+  }, 10_000);
 });
 
 describe("stop stops a live sidecar with or without a registry row", () => {

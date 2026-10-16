@@ -179,12 +179,37 @@ export async function healthCheck(cwd: string): Promise<boolean> {
     // BEFORE and require a NEW one after, so a pong left over from an earlier
     // probe cannot pass for this one.
     const countPongs = (t: string) => (t.match(/pong/gi) ?? []).length;
-    const before = countPongs(await orch.readAgent(id));
-    await orch.sendToAgent(id, "ping\n");
+    // Rowless (crews.db is crew-service-only, so every sidecar since v1.4.5 is): ping through
+    // the ONE live screen session by pid.name, exactly as poke does. The row-only path threw
+    // "agent not found" here and the catch turned it into "unresponsive" for a sidecar that
+    // answered pong in 1 s (2026-10-16 23:17Z, all 3 personas).
+    let read: () => Promise<string>;
+    let send: () => Promise<void>;
+    if (orch.store.getAgent(id)) {
+      read = () => orch.readAgent(id);
+      send = () => orch.sendToAgent(id, "ping\n");
+    } else {
+      const name = `wire-${id}`;
+      const pids = await liveSessionPids(name);
+      if (pids.length !== 1) {
+        console.warn(`[kx] healthCheck ${id}: ${pids.length} live sessions named ${name}; cannot ping exactly one`);
+        return false;
+      }
+      const target = `${pids[0]}.${name}`;
+      read = () => screen.readOutput(target);
+      send = async () => {
+        await screen.sendKeys(target, "ping");
+        await new Promise((r) => setTimeout(r, 700));
+        await screen.sendKeys(target, "\r");
+      };
+    }
+    const before = countPongs(await read());
+    await send();
     await new Promise((r) => setTimeout(r, 2000));
-    const after = countPongs(await orch.readAgent(id));
+    const after = countPongs(await read());
     return after > before;
-  } catch {
+  } catch (e) {
+    console.warn(`[kx] healthCheck ${id} failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
     return false;
   }
 }
