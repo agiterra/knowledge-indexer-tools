@@ -325,4 +325,12 @@ describe("launch survives the crews.db row refusal (crew-service owns writes)", 
     await launch(CWD, opts);
     expect(state.launchOpts[0]!.env?.CLAUDE_CODE_CHILD_SESSION).toBe("");
   });
+
+  test("launch env BLANKS AGENT_PRIVATE_KEY: a sidecar never holds the persona's key (Brioche 726977)", async () => {
+    await launch(CWD, opts);
+    const env = state.launchOpts[0]!.env ?? {};
+    // Present-and-empty, not absent: absent lets the login shell's inherited key through.
+    expect(Object.prototype.hasOwnProperty.call(env, "AGENT_PRIVATE_KEY")).toBe(true);
+    expect(env.AGENT_PRIVATE_KEY).toBe("");
+  });
 });
