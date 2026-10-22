@@ -9,4 +9,7 @@ export {
   resolveScriptsPath,
   reconcile,
   launchAndReconcile,
+  sessionContextTokens,
+  recycleIfOverCeiling,
+  CONTEXT_CEILING_TOKENS,
 } from "./sidecar.js";

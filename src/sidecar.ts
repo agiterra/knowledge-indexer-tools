@@ -6,13 +6,15 @@
  *
  * Sidecar is keyed by project directory (cwd), not agent ID. One sidecar
  * per repo, shared by all agents working in that directory. Exits after
- * 1 hour of inactivity.
+ * 1 hour of inactivity, and is relaunched past CONTEXT_CEILING_TOKENS.
  *
  * Uses crew-tools Orchestrator for agent lifecycle (screen sessions).
  * Communication via a file-based queue + screen sendKeys to poke.
  */
 
 import { join } from "path";
+import { homedir } from "os";
+import { readdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { createHash } from "crypto";
 import { Orchestrator, screen, createBackend } from "@agiterra/crew-tools";
 import { queuePath, enqueue, readQueueEntries } from "./queue.js";
@@ -58,6 +60,96 @@ async function confirmBootDialogs(name: string): Promise<void> {
 export const SIDECAR_MODEL = "haiku";
 
 const IDLE_TIMEOUT_MINUTES = 60;
+
+/**
+ * Relaunch a sidecar whose session context passes this many tokens.
+ *
+ * The idle exit is the ONLY other way a sidecar ends, and a vault written more
+ * often than hourly never goes idle. Baguette's sidecar ran 02:17Z-21:30Z on
+ * 2026-10-22 and reached 804k context per turn: every poke re-read the whole
+ * history, 4.4% of the Claude personal meter for one Haiku indexer. The queue
+ * is a file and index updates are idempotent, so a relaunch loses nothing.
+ */
+export const CONTEXT_CEILING_TOKENS = 100_000;
+
+/** Bytes read from the end of a session log when looking for its last usage record. */
+const USAGE_TAIL_BYTES = 512 * 1024;
+
+/**
+ * The sidecar's current context in tokens: the last usage record (input +
+ * cache_creation + cache_read) of its newest session log under
+ * <home>/.claude-agents/<id>/projects/. null when there is no log or no usage
+ * record yet -- "unknown", never "small".
+ */
+export function sessionContextTokens(
+  cwd: string,
+  home: string = homedir(),
+): { tokens: number; file: string } | null {
+  const root = join(home, ".claude-agents", sidecarId(cwd), "projects");
+  let newest: { file: string; mtime: number } | null = null;
+  let dirs: string[];
+  try {
+    dirs = readdirSync(root);
+  } catch {
+    return null;
+  }
+  for (const d of dirs) {
+    let names: string[];
+    try {
+      names = readdirSync(join(root, d));
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      if (!n.endsWith(".jsonl")) continue;
+      const file = join(root, d, n);
+      const mtime = statSync(file).mtimeMs;
+      if (!newest || mtime > newest.mtime) newest = { file, mtime };
+    }
+  }
+  if (!newest) return null;
+
+  const size = statSync(newest.file).size;
+  const len = Math.min(size, USAGE_TAIL_BYTES);
+  const buf = Buffer.alloc(len);
+  const fd = openSync(newest.file, "r");
+  try {
+    readSync(fd, buf, 0, len, size - len);
+  } finally {
+    closeSync(fd);
+  }
+  const lines = buf.toString("utf8").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"usage"')) continue;
+    try {
+      const u = JSON.parse(lines[i])?.message?.usage;
+      if (!u) continue;
+      const tokens =
+        (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+      return { tokens, file: newest.file };
+    } catch {
+      continue; // the first line of the tail is usually cut mid-record
+    }
+  }
+  return null;
+}
+
+/**
+ * Relaunch the sidecar when its context is past the ceiling. Returns the
+ * reading that triggered it, or null when no relaunch was needed. launch()'s
+ * own prompt makes the fresh sidecar check the queue, so no poke follows.
+ */
+export async function recycleIfOverCeiling(
+  cwd: string,
+  ceiling: number = CONTEXT_CEILING_TOKENS,
+  home: string = homedir(),
+): Promise<number | null> {
+  const ctx = sessionContextTokens(cwd, home);
+  if (!ctx || ctx.tokens <= ceiling) return null;
+  await stop(cwd);
+  await launch(cwd);
+  return ctx.tokens;
+}
 
 /**
  * Build an Orchestrator. The sidecar only calls methods that don't touch
